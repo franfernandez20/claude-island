@@ -285,31 +285,20 @@ class HookSocketServer {
 
     // MARK: - Tool Use ID Cache
 
-    /// Encoder with sorted keys for deterministic cache keys
-    private static let sortedEncoder: JSONEncoder = {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = .sortedKeys
-        return encoder
-    }()
-
-    /// Generate cache key from event properties
-    private func cacheKey(sessionId: String, toolName: String?, toolInput: [String: AnyCodable]?) -> String {
-        let inputStr: String
-        if let input = toolInput,
-           let data = try? Self.sortedEncoder.encode(input),
-           let str = String(data: data, encoding: .utf8) {
-            inputStr = str
-        } else {
-            inputStr = "{}"
-        }
-        return "\(sessionId):\(toolName ?? "unknown"):\(inputStr)"
+    /// Generate cache key from event properties.
+    /// Uses only sessionId + toolName — tool_input is intentionally excluded
+    /// because Claude Code can send slightly different input payloads between
+    /// PreToolUse and PermissionRequest (extra fields, type coercion), causing
+    /// cache misses that leave permission prompts unanswered.
+    private func cacheKey(sessionId: String, toolName: String?) -> String {
+        return "\(sessionId):\(toolName ?? "unknown")"
     }
 
     /// Cache tool_use_id from PreToolUse event (FIFO queue per key)
     private func cacheToolUseId(event: HookEvent) {
         guard let toolUseId = event.toolUseId else { return }
 
-        let key = cacheKey(sessionId: event.sessionId, toolName: event.tool, toolInput: event.toolInput)
+        let key = cacheKey(sessionId: event.sessionId, toolName: event.tool)
 
         cacheLock.lock()
         if toolUseIdCache[key] == nil {
@@ -323,7 +312,7 @@ class HookSocketServer {
 
     /// Pop and return cached tool_use_id for PermissionRequest (FIFO)
     private func popCachedToolUseId(event: HookEvent) -> String? {
-        let key = cacheKey(sessionId: event.sessionId, toolName: event.tool, toolInput: event.toolInput)
+        let key = cacheKey(sessionId: event.sessionId, toolName: event.tool)
 
         cacheLock.lock()
         defer { cacheLock.unlock() }
@@ -431,10 +420,12 @@ class HookSocketServer {
             } else if let cachedToolUseId = popCachedToolUseId(event: event) {
                 toolUseId = cachedToolUseId
             } else {
-                logger.warning("Permission request missing tool_use_id for \(event.sessionId.prefix(8), privacy: .public) - no cache hit")
-                close(clientSocket)
-                eventHandler?(event)
-                return
+                // Fallback: generate a synthetic ID so we can still hold the socket
+                // open and let the user approve/deny. Without this, the bridge gets
+                // a closed connection, exits with empty output, and the permission
+                // prompt may flash or get auto-dismissed.
+                toolUseId = "synthetic-\(event.sessionId.prefix(8))-\(UUID().uuidString.prefix(8))"
+                logger.warning("Permission request missing tool_use_id for \(event.sessionId.prefix(8), privacy: .public) - using synthetic: \(toolUseId, privacy: .public)")
             }
 
             logger.debug("Permission request - keeping socket open for \(event.sessionId.prefix(8), privacy: .public) tool:\(toolUseId.prefix(12), privacy: .public)")
