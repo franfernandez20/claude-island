@@ -41,8 +41,11 @@ class ClaudeSessionMonitor: ObservableObject {
                 Task {
                     await SessionStore.shared.process(.hookReceived(event))
 
-                    // Auto-approve if bypass mode is enabled for this session
-                    if event.expectsResponse {
+                    // Auto-approve if bypass mode is enabled for this session.
+                    // Exclude interactive tools (AskUserQuestion) — they need
+                    // the user to answer in the terminal, auto-allowing them
+                    // causes Claude Code to skip the prompt and get empty answers.
+                    if event.expectsResponse, event.tool != "AskUserQuestion" {
                         let isAutoApprove = await SessionStore.shared.isAutoApprove(sessionId: event.sessionId)
                         if isAutoApprove, let toolUseId = event.toolUseId {
                             HookSocketServer.shared.respondToPermission(
