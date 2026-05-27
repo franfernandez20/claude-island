@@ -294,8 +294,13 @@ actor SessionStore {
             }
 
         case "PostToolUse":
-            if ToolCallItem.isSubagentContainerName(event.tool) {
-                Self.logger.debug("PostToolUse for Task/Agent received (subagent still running)")
+            if ToolCallItem.isSubagentContainerName(event.tool), let toolUseId = event.toolUseId {
+                session.subagentState.stopTask(taskToolId: toolUseId)
+                Self.logger.debug("Stopped subagent tracking for \(toolUseId.prefix(12), privacy: .public)")
+            } else if let toolUseId = event.toolUseId,
+                      session.subagentState.hasActiveSubagent {
+                session.subagentState.updateSubagentToolStatus(toolId: toolUseId, status: .success)
+                syncSubagentToolsToChatItems(session: &session)
             }
 
         case "SubagentStop":
@@ -305,6 +310,24 @@ actor SessionStore {
 
         default:
             break
+        }
+    }
+
+    private func syncSubagentToolsToChatItems(session: inout SessionState) {
+        for (taskToolId, context) in session.subagentState.activeTasks {
+            guard !context.subagentTools.isEmpty else { continue }
+            for i in 0..<session.chatItems.count {
+                if session.chatItems[i].id == taskToolId,
+                   case .toolCall(var tool) = session.chatItems[i].type {
+                    tool.subagentTools = context.subagentTools
+                    session.chatItems[i] = ChatHistoryItem(
+                        id: taskToolId,
+                        type: .toolCall(tool),
+                        timestamp: session.chatItems[i].timestamp
+                    )
+                    break
+                }
+            }
         }
     }
 
