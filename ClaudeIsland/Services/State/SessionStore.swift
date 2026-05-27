@@ -32,6 +32,12 @@ actor SessionStore {
     /// Debounced publish task — coalesces rapid state changes into one UI update per frame
     private var publishTask: Task<Void, Never>?
 
+    /// Periodic status check task
+    private var statusCheckTask: Task<Void, Never>?
+
+    /// How often to recheck session status (seconds)
+    private let statusCheckIntervalSeconds: UInt64 = 3
+
     // MARK: - Published State (for UI)
 
     /// Publisher for session state changes (nonisolated for Combine subscription from any context)
@@ -995,6 +1001,75 @@ actor SessionStore {
     private func cancelPendingSync(sessionId: String) {
         pendingSyncs[sessionId]?.cancel()
         pendingSyncs.removeValue(forKey: sessionId)
+    }
+
+    // MARK: - Periodic Status Check
+
+    /// Start periodic status checking for all sessions
+    func startPeriodicStatusCheck() {
+        guard statusCheckTask == nil else { return }
+
+        let intervalSeconds = statusCheckIntervalSeconds
+        statusCheckTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: intervalSeconds * 1_000_000_000)
+                guard !Task.isCancelled else { break }
+                await self?.recheckAllSessions()
+            }
+        }
+        Self.logger.info("Started periodic status check (every \(intervalSeconds)s)")
+    }
+
+    /// Stop periodic status checking
+    func stopPeriodicStatusCheck() {
+        statusCheckTask?.cancel()
+        statusCheckTask = nil
+        Self.logger.info("Stopped periodic status check")
+    }
+
+    /// Recheck status of all active sessions
+    private func recheckAllSessions() {
+        var removedSession = false
+
+        for (sessionId, session) in Array(sessions) {
+            if session.phase == .ended {
+                sessions.removeValue(forKey: sessionId)
+                cancelPendingSync(sessionId: sessionId)
+                removedSession = true
+                continue
+            }
+
+            if let pid = session.pid {
+                let isRunning = isProcessRunning(pid: pid)
+                if !isRunning {
+                    Self.logger.info("Process \(pid) no longer running, ending session \(sessionId.prefix(8))")
+                    sessions.removeValue(forKey: sessionId)
+                    cancelPendingSync(sessionId: sessionId)
+                    removedSession = true
+                    continue
+                }
+            }
+
+            let needsSync: Bool
+            switch session.phase {
+            case .processing, .waitingForApproval:
+                needsSync = true
+            default:
+                needsSync = false
+            }
+            if needsSync {
+                scheduleFileSync(sessionId: sessionId, cwd: session.cwd)
+            }
+        }
+
+        if removedSession {
+            publishState()
+        }
+    }
+
+    /// Check if a process is still running
+    private nonisolated func isProcessRunning(pid: Int) -> Bool {
+        return kill(Int32(pid), 0) == 0
     }
 
     // MARK: - State Publishing
