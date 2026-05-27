@@ -534,6 +534,8 @@ struct MessageItemView: View {
             ToolCallView(tool: tool, sessionId: sessionId)
         case .thinking(let text):
             ThinkingView(text: text)
+        case .image(let block):
+            ImageMessageView(image: block)
         case .interrupted:
             InterruptedMessageView()
         }
@@ -546,8 +548,6 @@ struct ImageMessageView: View {
     let image: ImageBlock
 
     /// Decoded image cached so base64 isn't re-decoded on every render.
-    /// Large inline images (tens of KB) would otherwise thrash during
-    /// scrolling or parent re-renders.
     @State private var decoded: NSImage?
 
     var body: some View {
